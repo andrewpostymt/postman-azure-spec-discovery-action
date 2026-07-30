@@ -12,8 +12,12 @@ do not make the Azure action own every dispatch concern directly.
 
 The selected direction is:
 
+- For active application repositories, make build-generated OpenAPI artifacts
+  the primary source of truth. For .NET services, this means CI produces a
+  deterministic `swagger.json` from the `.csproj` build path before promotion.
 - Keep this repository as the authoritative discovery and normalization layer
-  for Azure-hosted API surfaces.
+  for Azure-hosted API surfaces that need inventory, mapping, backfill, or
+  gateway-state correlation.
 - Add provider-neutral inventory and mapping schemas that can represent APIM,
   API Center, App Service, WSO2, Apigee, Kong, MuleSoft, AWS API Gateway, and
   future gateway sources without changing downstream pipeline contracts.
@@ -24,6 +28,9 @@ The selected direction is:
 - Keep broad estate discovery in a controller repository. Target service repos
   should receive exact source identity or a spec artifact and should not scan
   the whole estate.
+- Treat gateway contracts, including WSO2 gateway artifacts, as downstream
+  deployment projections unless the gateway is the only available contract
+  source for a legacy service.
 
 This keeps the proven `postman-ado-spec-discovery` controller model while
 removing its APIM-specific assumptions.
@@ -60,11 +67,15 @@ Observed behavior:
 - Customer estates may include APIM, WSO2, API Center, runtime-declared specs,
   or services with no authored spec. A hardcoded APIM pipeline does not transfer
   cleanly across those environments.
+- Active service teams can produce a more deterministic OpenAPI contract during
+  build than by reverse-exporting from a gateway after deployment.
 
 Expected behavior:
 
 - One controller workflow inventories all visible API/spec sources from the
   available control planes.
+- Active repositories generate and validate `swagger.json` before promotion to
+  development environments.
 - The workflow emits normalized inventory and mapping files.
 - Humans approve or correct mappings where metadata confidence is not exact.
 - Approved mappings dispatch downstream onboarding pipelines with exact source
@@ -90,6 +101,8 @@ In scope:
 - Evidence and confidence model for repository ownership.
 - Migration path from APIM-specific ADO discovery schemas.
 - Documentation of unsupported and partial-spec cases.
+- Build-generated OpenAPI as the preferred source for active services.
+- Gateway-discovery backfill for legacy or no-new-work services.
 
 Out of scope:
 
@@ -99,6 +112,8 @@ Out of scope:
 - Mutating gateway resources.
 - Auto-approving weak name/path matches.
 - Replacing existing target onboarding templates in the first iteration.
+- Treating WSO2 export as deterministic when the same service can generate
+  OpenAPI from source during build.
 
 Assumptions and unknowns:
 
@@ -106,6 +121,8 @@ Assumptions and unknowns:
 - Gateway tags may be missing, stale, duplicated, or applied at the wrong level.
 - Some gateways may expose inventory but not exportable specifications.
 - Some services may have no spec in the gateway at all.
+- Some active services may need `.csproj` or build-pipeline updates before they
+  can emit `swagger.json` reliably.
 - ADO repository ownership may not be available from gateway metadata and may
   require a manual mapping step or an external service catalog.
 
@@ -240,6 +257,48 @@ Proposed estate model:
 
 This is the important scaling behavior: broad discovery happens once per
 controller run, while each target repo receives exact, bounded work.
+
+## Build-Generated Contract Policy
+
+For active application repositories, the preferred policy is not WSO2 -> OAS
+discovery. It is source/build -> OAS -> downstream consumers.
+
+For .NET services, that means:
+
+- the application repository owns `.csproj` changes required to emit
+  `swagger.json`;
+- CI generates `swagger.json` as part of build or pre-deploy validation;
+- the pipeline validates the generated document before promotion to `dev`;
+- Postman onboarding consumes that generated OpenAPI artifact;
+- WSO2 deployment consumes a translated gateway contract derived from the same
+  validated artifact.
+
+This makes the generated OpenAPI document the shared contract source for active
+development. WSO2 is then a deployment consumer and policy-enforcement surface,
+not the authoritative contract source.
+
+WSO2 -> OAS export remains useful only for bounded cases:
+
+- legacy services with no planned code changes;
+- initial inventory/backfill where no repository-generated spec exists yet;
+- drift detection between gateway state and source-generated contract;
+- migration assessment before the service adopts build-generated OpenAPI.
+
+It should not be described as deterministic unless the gateway stores and
+exports a complete authored specification with stable semantics. Gateway exports
+can be stale, transformed, policy-shaped, partial, or missing implementation
+detail. Those are valid discovery signals, but weaker contract authority than a
+spec generated from the application build.
+
+The rollout policy becomes:
+
+- active services must emit valid OpenAPI in CI before push or promotion to
+  `dev`;
+- nightly builds should regenerate and validate specs to measure coverage and
+  catch drift;
+- services without active development use the controller/backfill pipeline to
+  inventory, extract, or bootstrap specs;
+- both Postman and WSO2 consume the same validated artifact whenever possible.
 
 ## Proposed Schemas
 
@@ -536,7 +595,14 @@ Failure-before-mutation guarantees:
    - If management APIs are unavailable, classify WSO2 as association-only or
      manual-review for those services.
 
-8. Add live validation.
+8. Add build-generated OpenAPI integration.
+   - Define the `.csproj` / CI convention for emitting `swagger.json`.
+   - Add a pre-promotion gate that fails when the generated spec is missing,
+     invalid, or not attached as the source artifact for Postman/WSO2 consumers.
+   - Document WSO2 translation as downstream packaging from the validated
+     artifact, not as the primary contract source for active services.
+
+9. Add live validation.
    - Azure APIM estate inventory.
    - Existing mapping approval.
    - ADO dispatch to a fixture target repo.
@@ -572,6 +638,15 @@ For the current customer handoff, this proposal should be positioned as the
 future-state architecture behind scale-out, not as a committed scope item for
 the first service pipeline.
 
+The near-term customer boundary is therefore:
+
+- prove the selected service pipeline can consume a known OpenAPI artifact;
+- document that active services should generate `swagger.json` in build;
+- treat the gateway-discovery/backfill pipeline as a scale-out pattern for
+  services that will not receive `.csproj` updates soon;
+- avoid committing to org-wide nightly enforcement, repository provisioning, or
+  WSO2 parity as part of the initial handoff.
+
 ## Contract And Release Propagation
 
 | Repository/artifact | Contract change | Default/compatibility | Release dependency |
@@ -579,6 +654,8 @@ the first service pipeline.
 | `postman-azure-spec-discovery-action` | New inventory/mapping/source schemas and outputs | Additive; existing modes remain | New minor release |
 | `postman-ado-spec-discovery` | Migrate APIM schemas to generic schemas or depend on shared core | Existing APIM params still accepted | Coordinated branch or package version |
 | `postman-ado-pipeline-templates` | Accept `specSourceJson` / artifact path | Existing `specPath` and APIM params remain | Template version used by target repos |
+| Application repositories | Emit build-generated `swagger.json` before promotion | New convention per framework; starts opt-in | Customer app-team adoption |
+| WSO2 deployment pipeline | Translate validated OpenAPI into gateway contract | Gateway export remains backfill/drift signal | Customer gateway deployment path |
 | Target customer repos | Optional source binding and generic spec input | Existing hardcoded spec path still works until migrated | Per-repo adoption |
 | Documentation | Explain controller repo, mapping approval, dispatch, and caveats | New docs only | Published with release |
 
@@ -586,6 +663,8 @@ Migration:
 
 - Ship generic schemas alongside current outputs.
 - Add an APIM v1 mapping importer.
+- Add build-generated OpenAPI as the preferred source type for active service
+  repositories.
 - Keep APIM-specific dispatch parameters as compatibility aliases.
 - Migrate one customer controller repo first.
 - Remove APIM-specific aliases only after real adoption and release notes.
@@ -596,6 +675,8 @@ Rollback:
 - Revert target templates to `spec-path`.
 - Use prior approved mapping artifact.
 - Keep existing `resolve-one` action behavior untouched.
+- Let WSO2 continue consuming its existing gateway artifact while individual
+  services adopt build-generated OpenAPI.
 
 ## Metadata Caveats
 
@@ -611,6 +692,8 @@ Expected metadata that may be absent or wrong:
 - Deployment pipeline outputs that identify the gateway API.
 - API version, revision, or environment labels.
 - Exportable OpenAPI definitions.
+- Deterministic WSO2 export semantics.
+- Framework-specific build hooks for `swagger.json` generation.
 
 Design response:
 
@@ -620,6 +703,10 @@ Design response:
 - Require explicit approval before dispatch.
 - Label missing and partial specs clearly.
 - Never claim deterministic mapping from weak name/path/host similarity.
+- Prefer build-generated OpenAPI over gateway-exported OpenAPI for active
+  services.
+- Treat WSO2 export as backfill or drift evidence unless gateway export fidelity
+  has been validated for that service.
 
 This means the first estate run is likely an inventory and review exercise, not
 a fully automated rollout. Automation becomes safer as customers add durable
