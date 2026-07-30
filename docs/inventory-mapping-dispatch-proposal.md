@@ -268,6 +268,9 @@ For .NET services, that means:
 - the application repository owns `.csproj` changes required to emit
   `swagger.json`;
 - CI generates `swagger.json` as part of build or pre-deploy validation;
+- the onboarding pipeline discovers generated `swagger.json`, `swagger.yaml`,
+  or `swagger.yml` artifacts instead of requiring each repository to hardcode a
+  spec path;
 - the pipeline validates the generated document before promotion to `dev`;
 - Postman onboarding consumes that generated OpenAPI artifact;
 - WSO2 deployment consumes a translated gateway contract derived from the same
@@ -294,11 +297,28 @@ The rollout policy becomes:
 
 - active services must emit valid OpenAPI in CI before push or promotion to
   `dev`;
+- standard onboarding templates should resolve the generated spec path by
+  scanning known build artifact locations before Postman or WSO2 steps run;
 - nightly builds should regenerate and validate specs to measure coverage and
   catch drift;
 - services without active development use the controller/backfill pipeline to
   inventory, extract, or bootstrap specs;
 - both Postman and WSO2 consume the same validated artifact whenever possible.
+
+Spec discovery inside the target pipeline should be deterministic:
+
+- include only generated OpenAPI candidates matching approved names such as
+  `swagger.json`, `swagger.yaml`, and `swagger.yml`;
+- scan only bounded repository/build-output locations, not the whole working
+  tree by default;
+- ignore dependency, package, build-cache, and generated client folders;
+- select automatically only when exactly one valid candidate remains;
+- allow a committed binding or explicit selector only for repositories with
+  multiple intentional specs;
+- fail before gateway/Postman mutation when no candidate or multiple ambiguous
+  candidates remain;
+- emit the resolved spec path as the pipeline output consumed by Postman
+  onboarding and WSO2 translation.
 
 ## Proposed Schemas
 
@@ -597,6 +617,8 @@ Failure-before-mutation guarantees:
 
 8. Add build-generated OpenAPI integration.
    - Define the `.csproj` / CI convention for emitting `swagger.json`.
+   - Add a target-pipeline discovery step that resolves `swagger.json`,
+     `swagger.yaml`, or `swagger.yml` from bounded generated-artifact locations.
    - Add a pre-promotion gate that fails when the generated spec is missing,
      invalid, or not attached as the source artifact for Postman/WSO2 consumers.
    - Document WSO2 translation as downstream packaging from the validated
@@ -653,7 +675,7 @@ The near-term customer boundary is therefore:
 | --- | --- | --- | --- |
 | `postman-azure-spec-discovery-action` | New inventory/mapping/source schemas and outputs | Additive; existing modes remain | New minor release |
 | `postman-ado-spec-discovery` | Migrate APIM schemas to generic schemas or depend on shared core | Existing APIM params still accepted | Coordinated branch or package version |
-| `postman-ado-pipeline-templates` | Accept `specSourceJson` / artifact path | Existing `specPath` and APIM params remain | Template version used by target repos |
+| `postman-ado-pipeline-templates` | Discover generated `swagger.json/yaml`, then pass resolved path or `specSourceJson` | Existing `specPath` remains compatibility-only | Template version used by target repos |
 | Application repositories | Emit build-generated `swagger.json` before promotion | New convention per framework; starts opt-in | Customer app-team adoption |
 | WSO2 deployment pipeline | Translate validated OpenAPI into gateway contract | Gateway export remains backfill/drift signal | Customer gateway deployment path |
 | Target customer repos | Optional source binding and generic spec input | Existing hardcoded spec path still works until migrated | Per-repo adoption |
@@ -665,7 +687,9 @@ Migration:
 - Add an APIM v1 mapping importer.
 - Add build-generated OpenAPI as the preferred source type for active service
   repositories.
-- Keep APIM-specific dispatch parameters as compatibility aliases.
+- Keep explicit `specPath` and APIM-specific dispatch parameters as
+  compatibility aliases, but make generated-spec discovery the default for new
+  rollout templates.
 - Migrate one customer controller repo first.
 - Remove APIM-specific aliases only after real adoption and release notes.
 
