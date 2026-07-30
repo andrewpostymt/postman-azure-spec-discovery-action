@@ -162,6 +162,85 @@ The first option is cleaner if WSO2 and non-Azure gateways are real near-term
 targets. The second option is faster but risks making an Azure-named repository
 carry non-Azure semantics.
 
+## Packaging And Ownership Model
+
+If `postman-azure-spec-discovery-action` is tuned up and
+`postman-ado-spec-discovery` becomes the ADO transport layer, the split should
+be:
+
+- `postman-azure-spec-discovery-action` owns discoverability for Azure-hosted
+  surfaces: Azure auth, provider probing, candidate enumeration, export,
+  contract fidelity, evidence, and normalized inventory output.
+- A shared core owns provider-neutral schemas and pure lifecycle logic:
+  inventory normalization, mapping merge, confidence classification, removed
+  API handling, and source-object generation.
+- `postman-ado-spec-discovery` owns ADO orchestration: controller pipelines,
+  artifact publication, optional commit of inventory/mapping files, ADO pipeline
+  queueing, ADO run correlation, and target repo/branch serialization.
+- Target onboarding templates own Postman asset creation, repo-sync, lint,
+  collection runs, mocks, monitors, and target repository writes.
+
+In that model, `postman-ado-spec-discovery` is a wrapper/controller around the
+discoverability layer. It should not be embedded inside Azure provider code. It
+may consume the discovery layer in one of two ways:
+
+1. CLI composition:
+   - ADO pipeline authenticates with `AzureCLI@2` or workload identity.
+   - ADO controller calls the Azure discovery CLI in inventory mode.
+   - The CLI writes normalized `inventory.json`, exported specs, and suggested
+     `mapping.json`.
+   - ADO controller merges/commits/publishes those artifacts and dispatches
+     approved targets.
+
+2. Package composition:
+   - A shared `@postman-cse/spec-discovery-core` package exposes schemas,
+     mappers, merge logic, and provider interfaces.
+   - The Azure discovery action imports the core and registers Azure providers.
+   - The ADO controller imports the core and ADO dispatch adapter.
+   - Future gateway adapters, such as WSO2, can register against the same core
+     without becoming Azure-specific code.
+
+The CLI composition path is the lower-friction first step because it does not
+force an immediate monorepo/package split. The package composition path is the
+better long-term shape if non-Azure gateways are expected to be first-class.
+
+Under either path, ADO remains transport/controller, not discovery truth. It
+should not run `az apim` directly once Azure discovery can emit the same
+normalized inventory. Its job becomes:
+
+- select the controller scope;
+- call the discoverability layer;
+- preserve approved mapping state;
+- publish reviewable artifacts;
+- queue approved downstream pipelines;
+- record dispatch results.
+
+## Operating Model Shift
+
+The operating model changes from "each repository figures out its own API" to
+"a controller repository inventories the estate, then dispatches exact approved
+work."
+
+Current single-repo model:
+
+- Target repo runs discovery.
+- Target repo resolves one spec.
+- Target repo creates or updates Postman assets.
+- Target repo owns `.postman` state.
+
+Proposed estate model:
+
+- Controller repo runs discovery across a selected gateway or subscription
+  scope.
+- Controller repo writes inventory and suggested mappings.
+- Human or platform owner approves mappings.
+- Controller dispatches target pipelines only for approved mappings.
+- Target repo receives `specSourceJson` or an exported spec artifact and runs
+  normal onboarding without broad estate discovery.
+
+This is the important scaling behavior: broad discovery happens once per
+controller run, while each target repo receives exact, bounded work.
+
 ## Proposed Schemas
 
 Inventory document:
@@ -463,6 +542,35 @@ Failure-before-mutation guarantees:
    - ADO dispatch to a fixture target repo.
    - Target onboarding consuming `specSourceJson`.
    - Failure case for missing spec and duplicate ownership evidence.
+
+## Customer Delivery Boundary
+
+This design is larger than a single customer onboarding handoff. For a customer
+pilot, the deliverable should stay narrow:
+
+- validated target onboarding pipeline for the selected service;
+- customer-ready reset/run instructions for that pipeline;
+- known-good evidence from the target pipeline;
+- optional discovery inventory output as a proof artifact, if the customer
+  explicitly wants to inspect estate metadata.
+
+The pilot should not promise full estate automation, automatic repository
+mapping, WSO2 parity, or scaled dispatch unless those paths have been validated
+with the customer's real gateway metadata and ADO topology.
+
+Professional Services should have room to scale this into an operating program:
+
+- establish metadata standards such as `postman:repo` or service catalog owner
+  links;
+- review and approve the initial mapping file;
+- decide how repositories and pipelines are provisioned;
+- phase rollout by business domain, gateway, or API criticality;
+- define ownership for removed APIs, renamed services, and partial specs;
+- train customer teams on maintaining mappings and source bindings.
+
+For the current customer handoff, this proposal should be positioned as the
+future-state architecture behind scale-out, not as a committed scope item for
+the first service pipeline.
 
 ## Contract And Release Propagation
 
